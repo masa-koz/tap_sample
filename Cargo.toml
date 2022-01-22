@@ -10,6 +10,7 @@ futures = "0.3"
 num_cpus = "1.0"
 tokio = { version = "1.0.0", features = ["full", "tracing"] }
 console-subscriber = "0.1.0"
+mio = { version = "0.7.6" }
 
 [dependencies.windows]
 version = "0.29"

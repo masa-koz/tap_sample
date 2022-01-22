@@ -4,7 +4,8 @@ use std::os::windows::prelude::*;
 use std::thread;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+//use tokio::io::AsyncReadExt;
+use std::io::Read;
 use tokio::time::sleep;
 use windows::{
     core::*, Win32::Foundation::*, Win32::Storage::FileSystem::*, Win32::System::SystemServices::*,
@@ -21,8 +22,8 @@ const TAP_WIN_IOCTL_CONFIG_DHCP_MASQ: u32 = 0x00000022 << 16 | 0 << 14 | 7 << 2 
 const TAP_WIN_IOCTL_GET_LOG_LINE: u32 = 0x00000022 << 16 | 0 << 14 | 8 << 2 | 0;
 const TAP_WIN_IOCTL_CONFIG_DHCP_SET_OPT: u32 = 0x00000022 << 16 | 0 << 14 | 9 << 2 | 0;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+//#[tokio::main]
+fn main() -> Result<()> {
     console_subscriber::init();
 
     let mut packet: [u8; 4096] = [0; 4096];
@@ -30,7 +31,7 @@ async fn main() -> Result<()> {
         .read(true)
         .write(true)
         .create(false)
-        .attributes(FILE_ATTRIBUTE_SYSTEM)
+        .attributes(FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED)
         .open("\\\\.\\Global\\{4B1E624A-2DEA-4205-8F5F-596A45BECF24}.tap")
         .unwrap();
     unsafe {
@@ -165,6 +166,28 @@ async fn main() -> Result<()> {
         }
     }
 
+    let mut named_pipe = unsafe { mio::windows::NamedPipe::from_raw_handle(file.as_raw_handle()) };
+    let mut poll = mio::Poll::new().unwrap();
+    poll.registry()
+        .register(&mut named_pipe, mio::Token(0), mio::Interest::READABLE)
+        .unwrap();
+    let mut events = mio::Events::with_capacity(1024);
+    loop {
+        poll.poll(&mut events, None).unwrap();
+        for event in events.iter() {
+            match event.token() {
+                mio::Token(..) => {
+                    let ret = named_pipe.read(&mut packet[..]);
+                    println!("ret: {:?}", ret);
+                    if let Ok(n) = ret {
+                        println!("The bytes: {:?}", &packet[..n]);
+                    }
+                }
+            }
+        }
+    }
+
+    /*
     let cpus = num_cpus::get();
     println!("logical cores: {}", cpus);
 
@@ -178,6 +201,7 @@ async fn main() -> Result<()> {
                 let n = file.read(&mut packet[..]).await.unwrap();
                 println!("The bytes: {:?}", &packet[..n]);
             }
+
         });
     handles.push(task_a);
 
@@ -196,6 +220,7 @@ async fn main() -> Result<()> {
     }
 
     future::join_all(handles).await;
+    */
 
     Ok(())
 }
