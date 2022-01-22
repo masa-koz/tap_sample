@@ -4,7 +4,7 @@ use std::os::windows::prelude::*;
 use std::thread;
 use std::time::Duration;
 use tokio::fs::File;
-//use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use std::io::Read;
 use tokio::time::sleep;
 use windows::{
@@ -22,8 +22,8 @@ const TAP_WIN_IOCTL_CONFIG_DHCP_MASQ: u32 = 0x00000022 << 16 | 0 << 14 | 7 << 2 
 const TAP_WIN_IOCTL_GET_LOG_LINE: u32 = 0x00000022 << 16 | 0 << 14 | 8 << 2 | 0;
 const TAP_WIN_IOCTL_CONFIG_DHCP_SET_OPT: u32 = 0x00000022 << 16 | 0 << 14 | 9 << 2 | 0;
 
-//#[tokio::main]
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     console_subscriber::init();
 
     let mut packet: [u8; 4096] = [0; 4096];
@@ -166,6 +166,7 @@ fn main() -> Result<()> {
         }
     }
 
+    /*
     let mut named_pipe = unsafe { mio::windows::NamedPipe::from_raw_handle(file.as_raw_handle()) };
     let mut poll = mio::Poll::new().unwrap();
     poll.registry()
@@ -186,8 +187,8 @@ fn main() -> Result<()> {
             }
         }
     }
+    */
 
-    /*
     let cpus = num_cpus::get();
     println!("logical cores: {}", cpus);
 
@@ -196,16 +197,26 @@ fn main() -> Result<()> {
     let task_a = tokio::task::Builder::new()
         .name("Task A")
         .spawn(async move {
+            /*
             let mut file = File::from_std(file);
             loop {
                 let n = file.read(&mut packet[..]).await.unwrap();
                 println!("The bytes: {:?}", &packet[..n]);
             }
-
+            */
+            let mut named_pipe = unsafe {
+                tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+                    file.as_raw_handle(),
+                ).unwrap()
+            };
+            loop {
+                let n = named_pipe.read(&mut packet[..]).await.unwrap();
+                println!("The bytes: {:?}", &packet[..n]);
+            }
         });
     handles.push(task_a);
 
-    for i in 0..(cpus - 1) + 1 {
+    for i in 0..1 + 1 {
         let task_b = tokio::task::Builder::new()
             .name(&format!("Task B-{}", i))
             .spawn(async move {
@@ -220,7 +231,6 @@ fn main() -> Result<()> {
     }
 
     future::join_all(handles).await;
-    */
 
     Ok(())
 }
