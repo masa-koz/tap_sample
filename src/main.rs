@@ -1,11 +1,12 @@
 use futures::future;
 use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::os::windows::prelude::*;
 use std::thread;
 use std::time::Duration;
 use tokio::fs::File;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use std::io::Read;
 use tokio::time::sleep;
 use windows::{
     core::*, Win32::Foundation::*, Win32::Storage::FileSystem::*, Win32::System::SystemServices::*,
@@ -22,9 +23,17 @@ const TAP_WIN_IOCTL_CONFIG_DHCP_MASQ: u32 = 0x00000022 << 16 | 0 << 14 | 7 << 2 
 const TAP_WIN_IOCTL_GET_LOG_LINE: u32 = 0x00000022 << 16 | 0 << 14 | 8 << 2 | 0;
 const TAP_WIN_IOCTL_CONFIG_DHCP_SET_OPT: u32 = 0x00000022 << 16 | 0 << 14 | 9 << 2 | 0;
 
+
 #[tokio::main]
 async fn main() -> Result<()> {
     console_subscriber::init();
+        let icmp_echo: [u8; 74] = [
+        0x00, 0xff, 0x4b, 0x1e, 0x62, 0x4a, 0xfc, 0x34, 0x97, 0x97, 0x4f, 0xed, 0x08, 0x00, 0x45,
+        0x00, 0x00, 0x3c, 0x34, 0xf0, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0xac, 0x11, 0xff, 0x02,
+        0xac, 0x11, 0xff, 0x01, 0x08, 0x00, 0x4d, 0x2b, 0x00, 0x01, 0x00, 0x30, 0x61, 0x62, 0x63,
+        0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72,
+        0x73, 0x74, 0x75, 0x76, 0x77, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    ];
 
     let mut packet: [u8; 4096] = [0; 4096];
     let file = OpenOptions::new()
@@ -192,8 +201,20 @@ async fn main() -> Result<()> {
     let cpus = num_cpus::get();
     println!("logical cores: {}", cpus);
 
+    use tokio::sync::mpsc;
+    let (tx_a, mut rx_a) = mpsc::channel::<String>(10);
+    let (tx_b, mut rx_b) = mpsc::channel::<String>(10);
+
     let mut handles = Vec::new();
 
+    let mut named_pipe = Arc::new(unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+            file.as_raw_handle(),
+        )
+        .unwrap()
+    });
+
+    let file1 = named_pipe.clone();
     let task_a = tokio::task::Builder::new()
         .name("Task A")
         .spawn(async move {
@@ -204,33 +225,67 @@ async fn main() -> Result<()> {
                 println!("The bytes: {:?}", &packet[..n]);
             }
             */
-            let mut named_pipe = unsafe {
-                tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
-                    file.as_raw_handle(),
-                ).unwrap()
-            };
             loop {
-                let n = named_pipe.read(&mut packet[..]).await.unwrap();
-                println!("The bytes: {:?}", &packet[..n]);
+                tokio::select! {
+                    _ = file1.readable() => {
+                        match file1.try_read(&mut packet[..]) {
+                            Ok(n) => {                      
+                                tx_a.send(format!("Task A: Read packet {} bytes", n)).await.unwrap();
+                            },
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
+                            Err(e) => {
+                                tx_a.send(format!("Task A: Read failed {:?}", e)).await.unwrap();
+                            }
+                        }
+                    },
+                    _ = sleep(Duration::from_millis(68719476734)) => {
+                        tx_a.send(format!("Task A: wakeup")).await.unwrap();
+                    }
+                }
             }
         });
     handles.push(task_a);
 
-    for i in 0..1 + 1 {
-        let task_b = tokio::task::Builder::new()
-            .name(&format!("Task B-{}", i))
-            .spawn(async move {
+    let file2 = named_pipe.clone();
+    let task_b = tokio::task::Builder::new()
+        .name("Task B")
+        .spawn(async move {
+            loop {
+                thread::sleep(Duration::from_secs(5));
                 loop {
-                    println!("#Task B-{} sleeping... {:?}", i, thread::current().id());
-                    thread::sleep(Duration::from_secs(5)); // ブロッキング・スリープ
-                    println!("#Task B-{} woke up.", i);
-                    sleep(Duration::from_nanos(1)).await;
+                    if file2.writable().await.is_ok() {
+                        match file2.try_write(&icmp_echo) {
+                            Ok(n) => {
+                                tx_b.send(format!("Task B: Write Packet {} bytes.", n)).await.unwrap();
+                                break;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                tx_b.send(format!("Task B: Write would block")).await.unwrap();
+                                continue;
+                            },
+                            Err(e) => {
+                                tx_b.send(format!("Task b: Write failed {:?}", e)).await.unwrap();
+                                break;
+                            }
+                        }
+                    }
                 }
-            });
-        handles.push(task_b)
-    }
+                sleep(Duration::from_nanos(1)).await;
 
-    future::join_all(handles).await;
+            }
+        });
+    handles.push(task_b);
+
+    loop {
+        tokio::select! {
+            val = rx_a.recv() => {
+                println!("rx_a: {:?}", val);
+            }
+            val = rx_b.recv() => {
+                println!("rx_b: {:?}", val);
+            }
+        }
+    }
 
     Ok(())
 }
